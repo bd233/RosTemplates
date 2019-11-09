@@ -1,0 +1,243 @@
+{
+    "ROSTemplateFormatVersion": "2015-09-01",
+    "Description": "Create VPC ECS instance, and install shadowsocks",
+    "Parameters": {
+        "InstanceType": {
+            "Type": "String",
+            "Description": "ECS Instance Type",
+            "AllowedValues": [
+                "ecs.t5-lc2m1.nano",
+                "ecs.t5-lc1m1.small"
+            ],
+            "Label": "ECS Instance Type",
+            "Default": "ecs.t5-lc2m1.nano"
+        },
+        "ServerPort": {
+            "Type": "String",
+            "Description": "Server Port",
+            "Label": "Server Port",
+            "Default": "888"
+        },
+        "ServerPassword": {
+            "Type": "String",
+            "Description": "Server Password",
+            "Label": "Server Password",
+            "Default": "Init@1234"
+        },
+        "LoginPassword": {
+            "Type": "String",
+            "Description": "ECS Login Password",
+            "AllowedPattern": "[a-zA-Z0-9-\\(\\)\\`\\~\\!@\\#\\$%\\^&\\*-+=\\|\\{\\}\\[\\]\\:\\;\\‘\\,\\.\\?\\/]*",
+            "Label": "ECS Login Password",
+            "Default": "Init@1234",
+            "MinLength": 8,
+            "MaxLength": 41
+        },
+        "DomainName": {
+            "Type": "String",
+            "Description": "Domain name",
+            "Default": "bd233.wang"
+        }
+    },
+    "Resources": {
+        "vswitch": {
+            "Type": "ALIYUN::ECS::VSwitch",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "vpc"
+                },
+                "ZoneId": {
+                    "Fn::Select": [
+                        "0",
+                        {
+                            "Fn::GetAZs": {
+                                "Ref": "ALIYUN::Region"
+                            }
+                        }
+                    ]
+                },
+                "CidrBlock": "192.168.0.0/16"
+            }
+        },
+        "ecs": {
+            "Type": "ALIYUN::ECS::Instance",
+            "Properties": {
+                "IoOptimized": "optimized",
+                "PrivateIpAddress": "192.168.0.1",
+                "VpcId": {
+                    "Ref": "vpc"
+                },
+                "SecurityGroupId": {
+                    "Ref": "sg"
+                },
+                "VSwitchId": {
+                    "Ref": "vswitch"
+                },
+                "ImageId": "centos_7",
+                "AllocatePublicIP": true,
+                "InstanceType": {
+                    "Ref": "InstanceType"
+                },
+                "SystemDiskCategory": "cloud_ssd",
+                "Password": {
+                    "Ref": "LoginPassword"
+                },
+                "SystemDiskSize": 20,
+                "HostName": "bd01",
+                "UserData": {
+                    "Fn::Replace": [
+                        {
+                            "ros-notify": {
+                                "Fn::GetAtt": [
+                                    "Server_cloudinit_wait_cond_handle",
+                                    "CurlCli"
+                                ]
+                            }
+                        },
+                        {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    "#!/bin/bash\n",
+                                    "password=",
+                                    {
+                                        "Ref": "ServerPassword"
+                                    },
+                                    "\n",
+                                    "port=",
+                                    {
+                                        "Ref": "ServerPort"
+                                    },
+                                    "\n",
+                                    "encrypt=\"chacha20-ietf-poly1305\"\n",
+                                    "install_home=\"/etc/shadowsocks/\"\n",
+                                    "systemctl stop firewalld\n",
+                                    "systemctl disable firewalld\n",
+                                    "rm -rf $install_home\n",
+                                    "mkdir -p $install_home\n",
+                                    "yum -y install epel-release\n",
+                                    "yum install -y python-pip git  libsodium\n",
+                                    "pip install --upgrade pip\n",
+                                    "pip install setuptools\n",
+                                    "pip install git+https://github.com/shadowsocks/shadowsocks.git@master\n",
+                                    "cat > $install_home/config.json <<EOF\n",
+                                    "{\n",
+                                    "    \"server\":\"0.0.0.0\",\n",
+                                    "    \"server_port\":$port,\n",
+                                    "    \"password\":\"$password\",\n",
+                                    "    \"method\":\"$encrypt\"\n",
+                                    "}\n",
+                                    "EOF\n",
+                                    "echo \"/usr/local/lib\" > /etc/ld.so.conf.d/usr_local_lib.conf\n",
+                                    "ldconfig\n",
+                                    "start_cmd=\"ssserver -c \"$install_home\"config.json -d start\"\n",
+                                    "$start_cmd\n",
+                                    "if [ $? = \"0\" ];then\n",
+                                    "    ros-notify -d \"{\\\"id\\\" : \\\"VPNNode\\\", \\\"Data\\\" : \\\"SUCCESS\\\", \\\"status\\\" : \\\"SUCCESS\\\"}\"\n",
+                                    "else\n",
+                                    "    ros-notify -d \"{\\\"id\\\" : \\\"VPNNode\\\", \\\"Data\\\" : \\\"FAILURE\\\", \\\"status\\\" : \\\"FAILURE\\\"}\"\n",
+                                    "fi\n",
+                                    "sleep 3\n",
+                                    "echo $start_cmd >> /etc/rc.local\n",
+                                    "chmod +x /etc/rc.d/rc.local\n",
+                                    "echo \"安装成功,已加入开机自启,端口:$port 密码:$password 加密方式:$encrypt\"\n"
+                                ]
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
+        "sg": {
+            "Type": "ALIYUN::ECS::SecurityGroup",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "vpc"
+                },
+                "SecurityGroupName": "vpn-sg",
+                "SecurityGroupIngress": [
+                    {
+                        "PortRange": "-1/-1",
+                        "Priority": 1,
+                        "SourceCidrIp": "0.0.0.0/0",
+                        "IpProtocol": "icmp",
+                        "NicType": "intranet"
+                    },
+                    {
+                        "PortRange": "22/22",
+                        "Priority": 1,
+                        "SourceCidrIp": "0.0.0.0/0",
+                        "IpProtocol": "tcp",
+                        "NicType": "intranet"
+                    },
+                    {
+                        "PortRange": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "ServerPort"
+                                    },
+                                    "/",
+                                    {
+                                        "Ref": "ServerPort"
+                                    }
+                                ]
+                            ]
+                        },
+                        "Priority": 1,
+                        "SourceCidrIp": "0.0.0.0/0",
+                        "IpProtocol": "tcp",
+                        "NicType": "intranet"
+                    },
+                ]
+            }
+        },
+        "vpc": {
+            "Type": "ALIYUN::ECS::VPC",
+            "Properties": {
+                "CidrBlock": "192.168.0.0/16",
+                "VpcName": "myvpc"
+            }
+        },
+        "Server_cloudinit_wait_cond": {
+            "Type": "ALIYUN::ROS::WaitCondition",
+            "Properties": {
+                "Timeout": 7200,
+                "Count": 1,
+                "Handle": {
+                    "Ref": "Server_cloudinit_wait_cond_handle"
+                }
+            }
+        },
+        "Server_cloudinit_wait_cond_handle": {
+            "Type": "ALIYUN::ROS::WaitConditionHandle"
+        },
+        "DomainRecord": {
+            "Type": "ALIYUN::DNS::DomainRecord",
+            "Properties": {
+                "RR": "@",
+                "DomainName": {
+                    "Ref": "DomainName"
+                },
+                "Value": {
+                    "Fn::GetAtt": [
+                        "ecs",
+                        "PublicIp"
+                    ]
+                },
+                "Type": "A"
+            }
+        }
+    },
+    "Outputs": {
+        "ecs_instance_ip": {
+            "Value": {
+                "Fn::GetAtt": [
+                    "ecs",
+                    "PublicIp"
+                ]
+            }
+        }
+    }
+}
